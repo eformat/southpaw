@@ -15,15 +15,16 @@
  */
 package com.jwplayer.southpaw.serde;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Preconditions;
+import java.io.IOException;
+import java.util.Map;
+
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serializer;
 
-import java.io.IOException;
-import java.util.Map;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Preconditions;
 
 
 /**
@@ -54,7 +55,7 @@ public class JacksonSerde<T> implements Serde<T> {
         public T deserialize(String topic, byte[] bytes) {
             try {
                 if(bytes == null) return null;
-                return mapper.readValue(new String(bytes), clazz);
+                return mapper.readValue(bytes, clazz);
             } catch(IOException ex) {
                 throw new RuntimeException(ex);
             }

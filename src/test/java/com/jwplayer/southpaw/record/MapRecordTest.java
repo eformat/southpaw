@@ -15,12 +15,15 @@
  */
 package com.jwplayer.southpaw.record;
 
-import org.junit.Before;
-import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 
+import java.util.Collections;
 import java.util.Map;
 
-import static org.junit.Assert.*;
+import org.junit.Before;
+import org.junit.Test;
 
 
 public class MapRecordTest {
@@ -51,4 +54,13 @@ public class MapRecordTest {
         assertNotNull(map);
         assertEquals(0, map.size());
     }
+
+    @Test
+    public void testToMapWithNullValueInternalRecord() {
+        Map<String, ?> map = new MapRecord(Collections.singletonMap("key", null)).toMap();
+
+        assertNotNull(map);
+        assertEquals(1, map.size());
+    }
+
 }

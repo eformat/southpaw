@@ -15,12 +15,19 @@
  */
 package com.jwplayer.southpaw;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jwplayer.southpaw.json.DenormalizedRecord;
-import com.jwplayer.southpaw.record.BaseRecord;
-import com.jwplayer.southpaw.topic.BaseTopic;
-import com.jwplayer.southpaw.util.ByteArray;
-import com.jwplayer.southpaw.util.FileHelper;
+import static org.junit.Assert.assertEquals;
+
+import java.io.File;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
 import org.apache.commons.codec.binary.Hex;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.After;
@@ -29,12 +36,12 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.yaml.snakeyaml.Yaml;
 
-import java.io.File;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.*;
-
-import static org.junit.Assert.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jwplayer.southpaw.json.DenormalizedRecord;
+import com.jwplayer.southpaw.record.BaseRecord;
+import com.jwplayer.southpaw.topic.BaseTopic;
+import com.jwplayer.southpaw.util.ByteArray;
+import com.jwplayer.southpaw.util.FileHelper;
 
 
 @RunWith(Parameterized.class)
@@ -104,6 +111,9 @@ public class SouthpawEndToEndTest {
 
         for(int i = 0; i < maxRecords / 2; i++) {
             for(Map.Entry<String, BaseTopic<BaseRecord, BaseRecord>> entry: normalizedTopics.entrySet()) {
+                /*if (entry.getKey().equals("playlist") || entry.getKey().equals("media") || entry.getKey().equals("media")) {
+                    continue;
+                }*/
                 String[] json = records.get(entry.getKey());
                 if(json.length >= i * 2 + 2) {
                     entry.getValue().write(

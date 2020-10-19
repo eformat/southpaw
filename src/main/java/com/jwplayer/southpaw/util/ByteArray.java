@@ -15,16 +15,21 @@
  */
 package com.jwplayer.southpaw.util;
 
-import com.google.common.base.Preconditions;
-import com.google.common.primitives.Ints;
-import com.google.common.primitives.Longs;
+import java.io.Serializable;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
+
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.kafka.common.utils.Bytes;
 
-import java.io.Serializable;
-import java.nio.ByteBuffer;
-import java.util.*;
+import com.google.common.base.Charsets;
+import com.google.common.base.Preconditions;
+import com.google.common.primitives.Ints;
+import com.google.common.primitives.Longs;
 
 
 /**
@@ -73,11 +78,11 @@ public class ByteArray implements Comparable<ByteArray>, Serializable {
 
     /**
      * Constructor
-     * @param s - String to convert to a byte array using the default charset and wrap
+     * @param s - String to convert to a byte array using UTF-8 and wrap
      */
     public ByteArray(String s) {
         Preconditions.checkNotNull(s);
-        this.bytes = s.getBytes();
+        this.bytes = s.getBytes(Charsets.UTF_8);
     }
 
     @Override
@@ -217,6 +222,7 @@ public class ByteArray implements Comparable<ByteArray>, Serializable {
      * Gives a nice readable String version of the wrapped byte array. Useful for debugging.
      * @return - A pretty string representation
      */
+    @Override
     public String toString() {
         return Hex.encodeHexString(bytes);
     }
