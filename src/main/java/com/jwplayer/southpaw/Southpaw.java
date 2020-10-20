@@ -15,28 +15,21 @@
  */
 package com.jwplayer.southpaw;
 
-import com.codahale.metrics.Timer;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableSet;
-import com.jwplayer.southpaw.filter.BaseFilter;
-import com.jwplayer.southpaw.index.BaseIndex;
-import com.jwplayer.southpaw.index.MultiIndex;
-import com.jwplayer.southpaw.index.Reversible;
-import com.jwplayer.southpaw.json.*;
-import com.jwplayer.southpaw.record.BaseRecord;
-import com.jwplayer.southpaw.serde.BaseSerde;
-import com.jwplayer.southpaw.state.BaseState;
-import com.jwplayer.southpaw.state.RocksDBState;
-import com.jwplayer.southpaw.topic.BaseTopic;
-import com.jwplayer.southpaw.util.ByteArray;
-import com.jwplayer.southpaw.util.ByteArraySet;
-import com.jwplayer.southpaw.util.FileHelper;
-import com.jwplayer.southpaw.metric.Metrics;
-import com.jwplayer.southpaw.metric.StaticGauge;
-import com.jwplayer.southpaw.topic.TopicConfig;
-import joptsimple.OptionParser;
-import joptsimple.OptionSet;
+import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.Set;
+import java.util.TreeMap;
+
 import org.apache.commons.lang.ObjectUtils;
 import org.apache.commons.lang.time.StopWatch;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -45,11 +38,33 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.Yaml;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.*;
-import java.util.stream.Collectors;
+import com.codahale.metrics.Timer;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
+import com.jwplayer.southpaw.filter.BaseFilter;
+import com.jwplayer.southpaw.index.BaseIndex;
+import com.jwplayer.southpaw.index.MultiIndex;
+import com.jwplayer.southpaw.index.Reversible;
+import com.jwplayer.southpaw.json.ChildRecords;
+import com.jwplayer.southpaw.json.DenormalizedRecord;
+import com.jwplayer.southpaw.json.Record;
+import com.jwplayer.southpaw.json.Relation;
+import com.jwplayer.southpaw.metric.Metrics;
+import com.jwplayer.southpaw.metric.StaticGauge;
+import com.jwplayer.southpaw.record.BaseRecord;
+import com.jwplayer.southpaw.serde.BaseSerde;
+import com.jwplayer.southpaw.state.BaseState;
+import com.jwplayer.southpaw.state.RocksDBState;
+import com.jwplayer.southpaw.topic.BaseTopic;
+import com.jwplayer.southpaw.topic.ConsumerRecordIterator;
+import com.jwplayer.southpaw.topic.TopicConfig;
+import com.jwplayer.southpaw.util.ByteArray;
+import com.jwplayer.southpaw.util.ByteArraySet;
+import com.jwplayer.southpaw.util.FileHelper;
+
+import joptsimple.OptionParser;
+import joptsimple.OptionSet;
 
 
 /**
@@ -219,6 +234,25 @@ public class Southpaw {
         }
     }
 
+    static class RecordHolder {
+        long time;
+        String entity;
+        ConsumerRecordIterator<BaseRecord, BaseRecord> records;
+
+        boolean peek() {
+            while (records.hasNext()) {
+                BaseRecord record = records.peakNextValue();
+                if (record != null) {
+                    this.time = record.getEventTime();
+                    return true;
+                }
+                //skip tombstones
+                records.next();
+            }
+            return false;
+        }
+    }
+
     /**
      * Reads batches of new records from each of the input topics and creates the appropriate denormalized
      * records according to the top level relations. Performs a full commit and backup before returning.
@@ -235,109 +269,142 @@ public class Southpaw {
         StopWatch commitWatch = new StopWatch();
         commitWatch.start();
 
-        List<Map.Entry<String, BaseTopic<BaseRecord, BaseRecord>>> topics = new ArrayList<>(inputTopics.entrySet());
-        List<String> rootEntities = Arrays.stream(relations).map(Relation::getEntity).collect(Collectors.toList());
-        topics.sort((x, y) -> Boolean.compare(rootEntities.contains(x.getKey()), rootEntities.contains(y.getKey())));
+        PriorityQueue<RecordHolder> topicsByTime = new PriorityQueue<>((r, r1)->Long.compare(r.time, r1.time));
+        Set<String> toInitialize = new HashSet<>(inputTopics.keySet());
+        Long lastTime = null;
 
         while(processRecords) {
-            // Loop through each input topic and read a batch of records
+            for (String entity : new ArrayList<>(toInitialize)) {
+                BaseTopic<BaseRecord, BaseRecord> inputTopic = inputTopics.get(entity);
 
-            for (Map.Entry<String, BaseTopic<BaseRecord, BaseRecord>> entry : topics) {
-                String entity = entry.getKey();
-                BaseTopic<BaseRecord, BaseRecord> inputTopic = entry.getValue();
-
-                long topicLag;
                 calculateRecordsToCreate();
                 calculateTotalLag();
 
-                do {
-                    Iterator<ConsumerRecord<BaseRecord, BaseRecord>> records = inputTopic.readNext();
-                    // Loop through each record and process it
-                    while (records.hasNext()) {
-                        ConsumerRecord<BaseRecord, BaseRecord> newRecord = records.next();
-                        ByteArray primaryKey = newRecord.key().toByteArray();
-                        for (Relation root : relations) {
-                            Set<ByteArray> dePrimaryKeys = dePKsByType.get(root);
-                            if (root.getEntity().equals(entity)) {
-                                // The top level relation is the relation of the input record
-                                dePrimaryKeys.add(primaryKey);
-                            } else {
-                                // Check the child relations instead
-                                AbstractMap.SimpleEntry<Relation, Relation> child = getRelation(root, entity);
-                                if (child != null && child.getValue() != null) {
-                                    BaseIndex<BaseRecord, BaseRecord, Set<ByteArray>> parentIndex =
-                                            fkIndices.get(createParentIndexName(root, child.getKey(), child.getValue()));
-                                    ByteArray newParentKey = null;
-                                    Set<ByteArray> oldParentKeys;
-                                    if (newRecord.value() != null) {
-                                        newParentKey = ByteArray.toByteArray(newRecord.value().get(child.getValue().getJoinKey()));
-                                    }
-                                    BaseIndex<BaseRecord, BaseRecord, Set<ByteArray>> joinIndex =
-                                            fkIndices.get(createJoinIndexName(child.getValue()));
-                                    oldParentKeys = ((Reversible) joinIndex).getForeignKeys(primaryKey);
+                Iterator<ConsumerRecord<BaseRecord, BaseRecord>> records = inputTopic.readNext();
+                RecordHolder holder = new RecordHolder();
+                holder.records = (ConsumerRecordIterator<BaseRecord, BaseRecord>)records;
+                holder.entity = entity;
 
-                                    // Create the denormalized records
-                                    if (oldParentKeys != null) {
-                                        for (ByteArray oldParentKey : oldParentKeys) {
-                                            if (!ObjectUtils.equals(oldParentKey, newParentKey)) {
-                                                Set<ByteArray> primaryKeys = parentIndex.getIndexEntry(oldParentKey);
-                                                if (primaryKeys != null) {
-                                                    dePrimaryKeys.addAll(primaryKeys);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if (newParentKey != null) {
-                                        Set<ByteArray> primaryKeys = parentIndex.getIndexEntry(newParentKey);
+                if (holder.peek()) {
+                    topicsByTime.add(holder);
+                    toInitialize.remove(entity);
+                }
+            }
+
+            if (topicsByTime.isEmpty()) {
+                continue;
+            }
+
+            Long start = null;
+
+            while (!topicsByTime.isEmpty()) {
+                RecordHolder holder = topicsByTime.peek();
+                if (start == null) {
+                    start = holder.time;
+                }
+                long current = holder.time;
+                if (/*current- start > 1000 ||*/
+                        (!toInitialize.isEmpty() && current - start > 100)) {
+                    System.out.println("exiting loop");
+                    break; //emit and/or restart the loop
+                }
+                if (lastTime == null) {
+                    lastTime = current;
+                } else {
+                    if (current < lastTime) {
+                        throw new AssertionError("Out of order");
+                    }
+                    lastTime = current;
+                }
+                topicsByTime.poll(); //remove the first
+                ConsumerRecord<BaseRecord, BaseRecord> newRecord = holder.records.next();
+                System.out.println(newRecord.timestamp() + " " + newRecord);
+                if (holder.peek()) {
+                    topicsByTime.add(holder);
+                } else {
+                    toInitialize.add(holder.entity);
+                }
+                String entity = holder.entity;
+
+                ByteArray primaryKey = newRecord.key().toByteArray();
+                for (Relation root : relations) {
+                    Set<ByteArray> dePrimaryKeys = dePKsByType.get(root);
+                    if (root.getEntity().equals(entity)) {
+                        // The top level relation is the relation of the input record
+                        dePrimaryKeys.add(primaryKey);
+                    } else {
+                        // Check the child relations instead
+                        AbstractMap.SimpleEntry<Relation, Relation> child = getRelation(root, entity);
+                        if (child != null && child.getValue() != null) {
+                            BaseIndex<BaseRecord, BaseRecord, Set<ByteArray>> parentIndex =
+                                    fkIndices.get(createParentIndexName(root, child.getKey(), child.getValue()));
+                            ByteArray newParentKey = null;
+                            Set<ByteArray> oldParentKeys;
+                            if (newRecord.value() != null) {
+                                newParentKey = ByteArray.toByteArray(newRecord.value().get(child.getValue().getJoinKey()));
+                            }
+                            BaseIndex<BaseRecord, BaseRecord, Set<ByteArray>> joinIndex =
+                                    fkIndices.get(createJoinIndexName(child.getValue()));
+                            oldParentKeys = ((Reversible) joinIndex).getForeignKeys(primaryKey);
+
+                            // Create the denormalized records
+                            if (oldParentKeys != null) {
+                                for (ByteArray oldParentKey : oldParentKeys) {
+                                    if (!ObjectUtils.equals(oldParentKey, newParentKey)) {
+                                        Set<ByteArray> primaryKeys = parentIndex.getIndexEntry(oldParentKey);
                                         if (primaryKeys != null) {
                                             dePrimaryKeys.addAll(primaryKeys);
                                         }
                                     }
-                                    // Update the join index
-                                    updateJoinIndex(child.getValue(), primaryKey, newRecord);
                                 }
                             }
-                            int size = dePrimaryKeys.size();
-                            if(size > config.createRecordsTrigger) {
-                                createDenormalizedRecords(root, dePrimaryKeys);
-                                dePrimaryKeys.clear();
+                            if (newParentKey != null) {
+                                Set<ByteArray> primaryKeys = parentIndex.getIndexEntry(newParentKey);
+                                if (primaryKeys != null) {
+                                    dePrimaryKeys.addAll(primaryKeys);
+                                }
                             }
-                            metrics.denormalizedRecordsToCreateByTopic.get(root.getDenormalizedName()).update((long) size);
-                        }
-                        metrics.recordsConsumed.mark(1);
-                        metrics.recordsConsumedByTopic.get(entity).mark(1);
-                    }
-
-                    metrics.timeSinceLastBackup.update(backupWatch.getTime());
-                    topicLag = inputTopic.getLag();
-                    metrics.topicLagByTopic.get(entity).update(topicLag);
-                    reportRecordsToCreate();
-                    reportTotalLag();
-
-                    if(
-                            (config.backupTimeS > 0 && backupWatch.getTime() > config.backupTimeS * 1000)
-                            || (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0)) {
-                        try(Timer.Context context = metrics.backupsCreated.time()) {
-                            logger.info("Performing a backup after a full commit");
-                            calculateRecordsToCreate();
-                            calculateTotalLag();
-                            commit();
-                            state.backup();
-                            backupWatch.reset();
-                            backupWatch.start();
-                            if (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0) return;
-                        }
-                    } else if(config.commitTimeS > 0 && commitWatch.getTime() > config.commitTimeS * 1000) {
-                        try(Timer.Context context = metrics.stateCommitted.time()) {
-                            logger.info("Performing a full commit");
-                            calculateRecordsToCreate();
-                            calculateTotalLag();
-                            commit();
-                            commitWatch.reset();
-                            commitWatch.start();
+                            // Update the join index
+                            updateJoinIndex(child.getValue(), primaryKey, newRecord);
                         }
                     }
-                } while (topicLag > config.topicLagTrigger);
+                    int size = dePrimaryKeys.size();
+                    if(size > config.createRecordsTrigger) {
+                        createDenormalizedRecords(root, dePrimaryKeys);
+                        dePrimaryKeys.clear();
+                    }
+                    metrics.denormalizedRecordsToCreateByTopic.get(root.getDenormalizedName()).update((long) size);
+                }
+                metrics.recordsConsumed.mark(1);
+                metrics.recordsConsumedByTopic.get(entity).mark(1);
+
+                metrics.timeSinceLastBackup.update(backupWatch.getTime());
+                reportRecordsToCreate();
+                reportTotalLag();
+
+                if(
+                        (config.backupTimeS > 0 && backupWatch.getTime() > config.backupTimeS * 1000)
+                        || (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0)) {
+                    try(Timer.Context context = metrics.backupsCreated.time()) {
+                        logger.info("Performing a backup after a full commit");
+                        calculateRecordsToCreate();
+                        calculateTotalLag();
+                        commit();
+                        state.backup();
+                        backupWatch.reset();
+                        backupWatch.start();
+                        if (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0) return;
+                    }
+                } else if(config.commitTimeS > 0 && commitWatch.getTime() > config.commitTimeS * 1000) {
+                    try(Timer.Context context = metrics.stateCommitted.time()) {
+                        logger.info("Performing a full commit");
+                        calculateRecordsToCreate();
+                        calculateTotalLag();
+                        commit();
+                        commitWatch.reset();
+                        commitWatch.start();
+                    }
+                }
             }
 
             // Create the denormalized records that have been queued up
@@ -689,7 +756,7 @@ public class Southpaw {
             .setValueSerde(valueSerde)
             .setFilter(filter)
             .setMetrics(metrics));
-        
+
         return topic;
     }
 

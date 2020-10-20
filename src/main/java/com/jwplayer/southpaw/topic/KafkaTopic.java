@@ -62,7 +62,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
     /**
      * This allows us to capture the record and update our state when next() is called.
      */
-    private static class KafkaTopicIterator<K, V> implements Iterator<ConsumerRecord<K, V>> {
+    private static class KafkaTopicIterator<K, V> implements ConsumerRecordIterator<K, V> {
 
         protected Iterator<ConsumerRecord<byte[], byte[]>> iter;
         protected KafkaTopic<K, V> topic;
@@ -81,6 +81,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
         private ConsumerRecord<byte[], byte[]> nextRecord;
         private FilterMode nextRecordFilterMode;
         private ByteArray nextRecordPrimaryKey;
+        private V nextValue;
 
         /**
          * Constructor
@@ -91,6 +92,15 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
             this.iter = iter;
             this.topic = topic;
             this.resetStagedRecord();
+        }
+
+        @Override
+        public V peakNextValue() {
+            if (nextValue != null || nextRecord == null) {
+                return nextValue;
+            }
+            nextValue = topic.getValueSerde().deserializer().deserialize(nextRecord.topic(), nextRecord.value());
+            return nextValue;
         }
 
         /**
@@ -173,6 +183,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
             this.nextRecord = null;
             this.nextRecordFilterMode = null;
             this.nextRecordPrimaryKey = null;
+            this.nextValue = null;
         }
 
         @Override
@@ -193,8 +204,10 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
             }
 
             K key = topic.getKeySerde().deserializer().deserialize(record.topic(), record.key());
-            V value = topic.getValueSerde().deserializer().deserialize(record.topic(), record.value());
-
+            V value = nextValue;
+            if (nextValue == null) {
+                value = topic.getValueSerde().deserializer().deserialize(record.topic(), record.value());
+            }
             // update state
             switch (this.nextRecordFilterMode) {
                 case SKIP:
@@ -378,7 +391,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
     }
 
     @Override
-    public Iterator<ConsumerRecord<K, V>> readNext() {
+    public ConsumerRecordIterator<K, V> readNext() {
         return new KafkaTopicIterator<>(consumer.poll(pollTimeout).iterator(), this);
     }
 
