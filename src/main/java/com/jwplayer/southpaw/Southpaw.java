@@ -246,14 +246,10 @@ public class Southpaw {
         ConsumerRecordIterator<BaseRecord, BaseRecord> records;
 
         boolean peek() {
-            while (records.hasNext()) {
+            if (records.hasNext()) {
                 ConsumerRecord<byte[], byte[]> record = records.peekRawConsumerRecord();
                 BaseRecord baseRecord = records.peekValue();
                 this.time = record.timestamp();
-                if (baseRecord == null) {
-                    records.next(); //skip tombstones
-                    continue;
-                }
                 if (entity.equals(TRANSACTIONS)) {
                     String status = (String)baseRecord.get("status");
                     if ("BEGIN".equals(status)) {
@@ -420,10 +416,17 @@ public class Southpaw {
                 }
 
                 if (txnEvent) {
-                    if (flush && dePKsByType.values().stream().anyMatch((b)->!b.isEmpty())) {
-                        //output if anything has been modified
-                        logger.info("flushing values at transaction end");
-                        break; //to the end of the loop
+                    if (flush) {
+                        //commitOrBackup at the end of the txn so that we don't need can
+                        //start fresh
+                        if (commitOrBackup(runTimeS, backupWatch, runWatch, commitWatch)) {
+                            return;
+                        }
+                        if (dePKsByType.values().stream().anyMatch((b)->!b.isEmpty())) {
+                            //output if anything has been modified
+                            logger.info("flushing values at transaction end");
+                            break; //to the end of the loop
+                        }
                     }
                     continue;
                 }
@@ -483,33 +486,8 @@ public class Southpaw {
                 metrics.recordsConsumed.mark(1);
                 metrics.recordsConsumedByTopic.get(entity).mark(1);
 
-                metrics.timeSinceLastBackup.update(backupWatch.getTime());
                 reportRecordsToCreate();
                 reportTotalLag();
-
-                if(
-                        (config.backupTimeS > 0 && backupWatch.getTime() > config.backupTimeS * 1000)
-                        || (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0)) {
-                    try(Timer.Context context = metrics.backupsCreated.time()) {
-                        logger.info("Performing a backup after a full commit");
-                        calculateRecordsToCreate();
-                        calculateTotalLag();
-                        commit();
-                        state.backup();
-                        backupWatch.reset();
-                        backupWatch.start();
-                        if (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0) return;
-                    }
-                } else if(config.commitTimeS > 0 && commitWatch.getTime() > config.commitTimeS * 1000) {
-                    try(Timer.Context context = metrics.stateCommitted.time()) {
-                        logger.info("Performing a full commit");
-                        calculateRecordsToCreate();
-                        calculateTotalLag();
-                        commit();
-                        commitWatch.reset();
-                        commitWatch.start();
-                    }
-                }
             }
 
             // Create the denormalized records that have been queued up
@@ -519,6 +497,34 @@ public class Southpaw {
             }
         }
         commit();
+    }
+
+    private boolean commitOrBackup(int runTimeS, StopWatch backupWatch, StopWatch runWatch, StopWatch commitWatch) {
+        metrics.timeSinceLastBackup.update(backupWatch.getTime());
+        if(
+                (config.backupTimeS > 0 && backupWatch.getTime() > config.backupTimeS * 1000)
+                || (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0)) {
+            try(Timer.Context context = metrics.backupsCreated.time()) {
+                logger.info("Performing a backup after a full commit");
+                calculateRecordsToCreate();
+                calculateTotalLag();
+                commit();
+                state.backup();
+                backupWatch.reset();
+                backupWatch.start();
+                if (runWatch.getTime() > runTimeS * 1000 && runTimeS > 0) return true;
+            }
+        } else if(config.commitTimeS > 0 && commitWatch.getTime() > config.commitTimeS * 1000) {
+            try(Timer.Context context = metrics.stateCommitted.time()) {
+                logger.info("Performing a full commit");
+                calculateRecordsToCreate();
+                calculateTotalLag();
+                commit();
+                commitWatch.reset();
+                commitWatch.start();
+            }
+        }
+        return false;
     }
 
     /**

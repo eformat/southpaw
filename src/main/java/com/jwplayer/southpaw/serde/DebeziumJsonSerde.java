@@ -47,7 +47,7 @@ public class DebeziumJsonSerde implements BaseSerde<BaseRecord> {
             public BaseRecord deserialize(String topic, byte[] data) {
                 Map<String, ?> envelope = internalDeserializer.deserialize(topic, data);
                 if (envelope == null) {
-                    return null;
+                    return null; //tombstone
                 }
                 if (isKey || envelope.get("source") == null) {
                     if (envelope instanceof Map) {

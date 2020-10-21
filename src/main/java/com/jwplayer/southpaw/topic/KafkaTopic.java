@@ -62,7 +62,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
     /**
      * This allows us to capture the record and update our state when next() is called.
      */
-    private static class KafkaTopicIterator<K, V> implements ConsumerRecordIterator<K, V> {
+    private class KafkaTopicIterator<K, V> implements ConsumerRecordIterator<K, V> {
 
         protected Iterator<ConsumerRecord<byte[], byte[]>> iter;
         protected KafkaTopic<K, V> topic;
@@ -91,7 +91,6 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
         private KafkaTopicIterator(Iterator<ConsumerRecord<byte[], byte[]>> iter, KafkaTopic<K, V> topic) {
             this.iter = iter;
             this.topic = topic;
-            this.resetStagedRecord();
         }
 
         @Override
@@ -125,9 +124,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
             // Obtain a record and stage it
             while(iter.hasNext() && filterMode == FilterMode.SKIP) {
                 record = iter.next();
-                // The current offset is one ahead of the last read one.
-                // This copies what Kafka would return as the current offset.
-                topic.setCurrentOffset(record.offset() + 1L);
+                topic.setCurrentOffset(record.offset());
 
                 key = topic.getKeySerde().deserializer().deserialize(record.topic(), record.key());
                 value = topic.getValueSerde().deserializer().deserialize(record.topic(), record.value());
@@ -227,6 +224,9 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
             }
 
             // mark the record as consumed from the staging area and return
+            //The current offset is one ahead of the last read one.
+            //This copies what Kafka would return as the current offset.
+            setCurrentOffset(record.offset() + 1L);
             this.resetStagedRecord();
             return new ConsumerRecord<>(
                 record.topic(),

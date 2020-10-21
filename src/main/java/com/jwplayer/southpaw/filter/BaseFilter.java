@@ -144,7 +144,7 @@ public class BaseFilter {
      *
      * @param entity - The entity of the given record
      * @param record - The record to filter
-     * @param oldRecord - The previously seen record state (may be null)
+     * @param lookup - A supplier for the previously seen record state, which may be null
      * @return FilterMode - Describes how to handle the input record
      */
     public FilterMode filter(String entity, BaseRecord record, Supplier<BaseRecord> lookup) {
