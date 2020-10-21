@@ -6,8 +6,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 
 public interface ConsumerRecordIterator<K, V> extends Iterator<ConsumerRecord<K, V>>{
 
-    default V peakNextValue() {
-        throw new UnsupportedOperationException();
-    }
+    ConsumerRecord<byte[], byte[]> peekRawConsumerRecord();
+
+    V peekValue();
 
 }

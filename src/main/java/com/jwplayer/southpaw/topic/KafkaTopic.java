@@ -95,11 +95,12 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
         }
 
         @Override
-        public V peakNextValue() {
-            if (nextValue != null || nextRecord == null) {
-                return nextValue;
-            }
-            nextValue = topic.getValueSerde().deserializer().deserialize(nextRecord.topic(), nextRecord.value());
+        public ConsumerRecord<byte[], byte[]> peekRawConsumerRecord() {
+            return nextRecord;
+        }
+
+        @Override
+        public V peekValue() {
             return nextValue;
         }
 
@@ -116,11 +117,10 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
             }
 
             ConsumerRecord<byte[], byte[]> record = null;
-            BaseRecord oldRec = null;
             FilterMode filterMode = FilterMode.SKIP;
             ByteArray primaryKey = null;
             K key;
-            V value, currState;
+            V value = null;
 
             // Obtain a record and stage it
             while(iter.hasNext() && filterMode == FilterMode.SKIP) {
@@ -138,15 +138,18 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
                     primaryKey = new ByteArray(record.key());
                 }
 
-                currState = topic.readByPK(primaryKey);
-                if (currState instanceof BaseRecord) {
-                    oldRec = (BaseRecord) currState;
-                }
-
                 // Non-BaseRecord value types will not be filtered
                 if (value instanceof BaseRecord) {
-                    filterMode = topic.getFilter().filter(topic.topicConfig.shortName, (BaseRecord) value, oldRec);
-                } else {
+                    final ByteArray pk = primaryKey;
+                    filterMode = topic.getFilter().filter(topic.topicConfig.shortName, (BaseRecord) value, ()->{
+                        BaseRecord oldRec = null;
+                        V currState = topic.readByPK(pk);
+                        if (currState instanceof BaseRecord) {
+                            oldRec = (BaseRecord) currState;
+                        }
+                        return oldRec;
+                    });
+                } else if (value != null){ //skip tombstones
                     filterMode = FilterMode.UPDATE;
                 }
 
@@ -169,6 +172,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
                 this.nextRecord = record;
                 this.nextRecordFilterMode = filterMode;
                 this.nextRecordPrimaryKey = primaryKey;
+                this.nextValue = value;
             }
 
             return this.nextRecord;
@@ -205,9 +209,6 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
 
             K key = topic.getKeySerde().deserializer().deserialize(record.topic(), record.key());
             V value = nextValue;
-            if (nextValue == null) {
-                value = topic.getValueSerde().deserializer().deserialize(record.topic(), record.value());
-            }
             // update state
             switch (this.nextRecordFilterMode) {
                 case SKIP:
@@ -219,7 +220,8 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
                     break;
                 case UPDATE:
                 default:
-                    //TODO: for debezium this should just be the serialization of the value, not the whole envelope
+                    //TODO: for debezium this could be the serialization of the value, not the whole envelope if we don't need txn processing
+                    //TODO: for transaction topics, we shouldn't track this state
                     topic.getState().put(topic.getShortName() + "-" + DATA, this.nextRecordPrimaryKey.getBytes(), record.value());
                     break;
             }

@@ -57,9 +57,8 @@ public class DebeziumJsonSerde implements BaseSerde<BaseRecord> {
                     return new MapRecord(Collections.singletonMap("id", envelope));
                 }
                 Map<String, ?> after = (Map<String, ?>) envelope.get("after");
-                Long tsMs = (Long)envelope.get("ts_ms");
                 MapRecord result = new MapRecord(after);
-                result.setEventTime(tsMs);
+                result.setMetadata(envelope);
                 return result;
             }
 

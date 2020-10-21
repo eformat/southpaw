@@ -27,7 +27,8 @@ import com.jwplayer.southpaw.util.ByteArray;
  */
 public abstract class BaseRecord {
 
-    private Long eventTime;
+    private Map<String, ?> metadata;
+
     /**
      * Accessor for a particular field in this record
      * @param fieldName - The name of the field to get
@@ -85,11 +86,11 @@ public abstract class BaseRecord {
         return toMap().toString();
     }
 
-    public Long getEventTime() {
-        return eventTime;
+    public Map<String, ?> getMetadata() {
+        return metadata;
     }
 
-    public void setEventTime(Long eventTime) {
-        this.eventTime = eventTime;
+    public void setMetadata(Map<String, ?> metadata) {
+        this.metadata = metadata;
     }
 }

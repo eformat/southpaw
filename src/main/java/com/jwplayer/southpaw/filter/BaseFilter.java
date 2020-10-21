@@ -15,14 +15,15 @@
  */
 package com.jwplayer.southpaw.filter;
 
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Supplier;
+
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.jmx.JmxReporter;
 import com.jwplayer.southpaw.record.BaseRecord;
-
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
 
 
 /**
@@ -79,11 +80,11 @@ public class BaseFilter {
 
     /**
      * Used to inform how a record should be handled:
-     * 
+     *
      * UPDATE: Do not filter (no op) by advancing offset and updating state, output record produced.
      * SKIP: Skip record and advance offset, don't update state, output record not produced.
      * DELETE: Delete record by advancing offset and updating state, output record produced.
-     * 
+     *
      */
     public enum FilterMode { UPDATE, SKIP, DELETE }
 
@@ -140,18 +141,18 @@ public class BaseFilter {
 
     /**
      * Determines if the given record should be filtered based on its entity and previous entity state.
-     * 
+     *
      * @param entity - The entity of the given record
      * @param record - The record to filter
      * @param oldRecord - The previously seen record state (may be null)
      * @return FilterMode - Describes how to handle the input record
      */
-    public FilterMode filter(String entity, BaseRecord record, BaseRecord oldRecord) {
+    public FilterMode filter(String entity, BaseRecord record, Supplier<BaseRecord> lookup) {
         FilterMode mode;
         if (record == null || record.isEmpty()) {
             mode = FilterMode.DELETE;
         } else {
-            mode = customFilter(entity, record, oldRecord);
+            mode = customFilter(entity, record, lookup.get());
         }
 
         metrics.getMeter(entity, mode).mark(1);

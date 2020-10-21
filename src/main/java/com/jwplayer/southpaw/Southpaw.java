@@ -153,6 +153,9 @@ public class Southpaw {
      */
     protected BaseState state;
 
+    protected String topicPrefix = "dbserver1";
+    private static final String TRANSACTIONS = "transactions";
+
     /**
      * Base Southpaw config
      */
@@ -222,6 +225,7 @@ public class Southpaw {
             this.outputTopics.put(root.getDenormalizedName(), createOutputTopic(root.getDenormalizedName()));
             this.metrics.registerOutputTopic(root.getDenormalizedName());
         }
+        this.inputTopics.put(TRANSACTIONS, createTopic(TRANSACTIONS));
         for(Map.Entry<String, BaseTopic<BaseRecord, BaseRecord>> entry: this.inputTopics.entrySet()) {
             this.metrics.registerInputTopic(entry.getKey());
         }
@@ -234,22 +238,53 @@ public class Southpaw {
         }
     }
 
-    static class RecordHolder {
+    static class RecordHolder implements Comparable<RecordHolder> {
         long time;
+        long order;
         String entity;
+        String txn;
         ConsumerRecordIterator<BaseRecord, BaseRecord> records;
 
         boolean peek() {
             while (records.hasNext()) {
-                BaseRecord record = records.peakNextValue();
-                if (record != null) {
-                    this.time = record.getEventTime();
-                    return true;
+                ConsumerRecord<byte[], byte[]> record = records.peekRawConsumerRecord();
+                BaseRecord baseRecord = records.peekValue();
+                this.time = record.timestamp();
+                if (baseRecord == null) {
+                    records.next(); //skip tombstones
+                    continue;
                 }
-                //skip tombstones
-                records.next();
+                if (entity.equals(TRANSACTIONS)) {
+                    String status = (String)baseRecord.get("status");
+                    if ("BEGIN".equals(status)) {
+                        order = -1;
+                    } else if ("END".equals(status)) {
+                        order = Long.MAX_VALUE;
+                    }
+                    txn = (String)baseRecord.get("id");
+                } else {
+                    Map<String, ?> transaction = (Map<String, ?>) baseRecord.getMetadata().get("transaction");
+                    if (transaction != null) {
+                        this.order = ((Number)transaction.get("total_order")).longValue();
+                        txn = (String)transaction.get("id");
+                    }
+                }
+                return true;
             }
             return false;
+        }
+
+        @Override
+        public int compareTo(RecordHolder o) {
+            int result = Long.compare(time, o.time);
+            if (result != 0) {
+                return result;
+            }
+            result = Long.compare(order, o.order);
+            if (result != 0) {
+                return result;
+            }
+            return 0;
         }
     }
 
@@ -269,11 +304,18 @@ public class Southpaw {
         StopWatch commitWatch = new StopWatch();
         commitWatch.start();
 
-        PriorityQueue<RecordHolder> topicsByTime = new PriorityQueue<>((r, r1)->Long.compare(r.time, r1.time));
+        PriorityQueue<RecordHolder> topicsByTime = new PriorityQueue<>();
         Set<String> toInitialize = new HashSet<>(inputTopics.keySet());
-        Long lastTime = null;
+        Map<String, String> topicToAlias = new HashMap<>();
+        inputTopics.entrySet().stream().forEach((e) -> topicToAlias.put(e.getValue().getTopicName(), e.getKey()));
 
-        while(processRecords) {
+        Long lastTime = null;
+        //TODO: could combine with the record holders
+        Map<String, Integer> transactionEvents = new HashMap<>();
+        String txn = null;
+        boolean explicitTxn = false;
+
+        probe: while(processRecords) {
             for (String entity : new ArrayList<>(toInitialize)) {
                 BaseTopic<BaseRecord, BaseRecord> inputTopic = inputTopics.get(entity);
 
@@ -292,38 +334,100 @@ public class Southpaw {
             }
 
             if (topicsByTime.isEmpty()) {
-                continue;
+                continue; //poll again
             }
-
-            Long start = null;
 
             while (!topicsByTime.isEmpty()) {
                 RecordHolder holder = topicsByTime.peek();
-                if (start == null) {
-                    start = holder.time;
+
+                System.out.println(holder.entity + " " + holder.time + " " + holder.records.peekValue());
+
+                boolean flush = false;
+                boolean txnEvent = false;
+
+                if (holder.entity.equals(TRANSACTIONS)) {
+                    txnEvent = true;
+                    Object status = holder.records.peekValue().get("status");
+                    if ("BEGIN".equals(status)) {
+                        transactionEvents.clear();
+                        if (txn != null && !explicitTxn) {
+                            flush = true;
+                        }
+                        if (explicitTxn || (txn != null && !txn.equals(holder.txn))) {
+                            throw new AssertionError("Unexpected begin of transaction");
+                        }
+                        txn = holder.txn;
+                        explicitTxn = true;
+                    } else if ("END".equals(status)) {
+                        if (!holder.txn.equals(txn)) {
+                            throw new AssertionError("Unexpected end of transaction");
+                        }
+                        //TODO: check the data_collections against the transactionEvents;
+                        List<Map<String, ?>> dataCollections = (List<Map<String, ?>>) holder.records.peekValue().get("data_collections");
+                        if (dataCollections != null) {
+                            for (Map<String, ?> dataCollection : dataCollections) {
+                                String topic = (String)dataCollection.get("data_collection");
+                                String alias = topicToAlias.get(topicPrefix + "." + topic);
+                                if (alias == null) {
+                                    continue; //not involved
+                                }
+                                Integer count = transactionEvents.get(alias);
+                                if ((count == null || (((Number)dataCollection.get("event_count")).intValue()) > count)) {
+                                    if (toInitialize.contains(alias)) {
+                                        logger.info("waiting for " + alias);
+                                        continue probe; //TODO: probe only missing, and only do this a limited number of times
+                                    }
+                                    logger.warn("probes are up-to-date, but events do not line up");
+                                }
+                            }
+                        }
+
+                        txn = null;
+                        explicitTxn = false;
+                        flush = true;  //TODO: could skip if there are pending txn messages
+                        logger.debug("closing transaction " + holder.txn);
+                    }
+                } else {
+                    if (txn == null) {
+                        if (toInitialize.contains(TRANSACTIONS)) {
+                            //probe again to know what transaction to start
+                            logger.info("waiting for transaction begin");
+                            continue probe; //TODO: probe only txn, and only do this a limited number of times
+                        }
+                        //assume it's some kind of implicit transaction?
+                        txn = holder.txn;
+                    }
+                    transactionEvents.compute(holder.entity, (k, v)->v==null?1:v+1);
                 }
+
                 long current = holder.time;
-                if (/*current- start > 1000 ||*/
-                        (!toInitialize.isEmpty() && current - start > 100)) {
-                    System.out.println("exiting loop");
-                    break; //emit and/or restart the loop
-                }
                 if (lastTime == null) {
                     lastTime = current;
                 } else {
                     if (current < lastTime) {
-                        throw new AssertionError("Out of order");
+                        logger.warn("Considering an out of order event");
                     }
                     lastTime = current;
                 }
-                topicsByTime.poll(); //remove the first
+
+                //advance the topic
+                topicsByTime.poll();
                 ConsumerRecord<BaseRecord, BaseRecord> newRecord = holder.records.next();
-                System.out.println(newRecord.timestamp() + " " + newRecord);
                 if (holder.peek()) {
                     topicsByTime.add(holder);
                 } else {
                     toInitialize.add(holder.entity);
                 }
+
+                if (txnEvent) {
+                    if (flush && dePKsByType.values().stream().anyMatch((b)->!b.isEmpty())) {
+                        //output if anything has been modified
+                        logger.info("flushing values at transaction end");
+                        break; //to the end of the loop
+                    }
+                    continue;
+                }
+
                 String entity = holder.entity;
 
                 ByteArray primaryKey = newRecord.key().toByteArray();
@@ -369,10 +473,11 @@ public class Southpaw {
                         }
                     }
                     int size = dePrimaryKeys.size();
-                    if(size > config.createRecordsTrigger) {
+                    //TODO: could need handling of this case transactionally
+                    /*if(size > config.createRecordsTrigger) {
                         createDenormalizedRecords(root, dePrimaryKeys);
                         dePrimaryKeys.clear();
-                    }
+                    }*/
                     metrics.denormalizedRecordsToCreateByTopic.get(root.getDenormalizedName()).update((long) size);
                 }
                 metrics.recordsConsumed.mark(1);
