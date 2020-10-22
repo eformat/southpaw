@@ -226,7 +226,11 @@ public class Southpaw {
             this.outputTopics.put(root.getDenormalizedName(), createOutputTopic(root.getDenormalizedName()));
             this.metrics.registerOutputTopic(root.getDenormalizedName());
         }
-        this.inputTopics.put(TRANSACTIONS, createTopic(TRANSACTIONS));
+        try {
+            this.inputTopics.put(TRANSACTIONS, createTopic(TRANSACTIONS));
+        } catch (NullPointerException e) {
+            //transactions not defined
+        }
         this.topicsPrefixed = (Boolean) rawConfig.getOrDefault("topics.prefixed", true);
         for(Map.Entry<String, BaseTopic<BaseRecord, BaseRecord>> entry: this.inputTopics.entrySet()) {
             this.metrics.registerInputTopic(entry.getKey());
@@ -251,6 +255,7 @@ public class Southpaw {
             if (records.hasNext()) {
                 ConsumerRecord<byte[], byte[]> record = records.peekRawConsumerRecord();
                 BaseRecord baseRecord = records.peekValue();
+                //take the time as the message, which should work whether txn metadata is available or not
                 this.time = record.timestamp();
                 if (entity.equals(TRANSACTIONS)) {
                     String status = (String)baseRecord.get("status");
@@ -261,6 +266,8 @@ public class Southpaw {
                     }
                     txn = (String)baseRecord.get("id");
                 } else {
+                    //since the full envelope is the metadata, we could use other notions of time
+                    //ts_ms, source.ts_, or even something from the before/after
                     Map<String, ?> transaction = (Map<String, ?>) baseRecord.getMetadata().get("transaction");
                     if (transaction != null) {
                         this.order = ((Number)transaction.get("total_order")).longValue();

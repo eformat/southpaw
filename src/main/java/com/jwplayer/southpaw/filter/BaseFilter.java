@@ -152,7 +152,7 @@ public class BaseFilter {
         if (record == null || record.isEmpty()) {
             mode = FilterMode.DELETE;
         } else {
-            mode = customFilter(entity, record, lookup.get());
+            mode = customFilter(entity, record, lookup!=null?lookup.get():null);
         }
 
         metrics.getMeter(entity, mode).mark(1);
