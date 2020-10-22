@@ -53,7 +53,8 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
     public static final long END_OFFSET_REFRESH_MS_DEFAULT = 60000;
     public static final String POLL_TIMEOUT_CONFIG = "poll.timeout";
     public static final long POLL_TIMEOUT_DEFAULT = 1000;
-
+    public static final String PERSISTENT = "persistent";
+    public static final boolean PERSISTENT_DEFAULT = true;
     /**
      * Le Logger
      */
@@ -212,14 +213,17 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
                     // By design, this should never be the case
                     throw new IllegalStateException("Staged record has unexpected filter mode of SKIP");
                 case DELETE:
-                    topic.getState().delete(topic.getShortName() + "-" + DATA, this.nextRecordPrimaryKey.getBytes());
+                    if (persistent) {
+                        topic.getState().delete(topic.getShortName() + "-" + DATA, this.nextRecordPrimaryKey.getBytes());
+                    }
                     value = null;
                     break;
                 case UPDATE:
                 default:
                     //TODO: for debezium this could be the serialization of the value, not the whole envelope if we don't need txn processing
-                    //TODO: for transaction topics, we shouldn't track this state
-                    topic.getState().put(topic.getShortName() + "-" + DATA, this.nextRecordPrimaryKey.getBytes(), record.value());
+                    if (persistent) {
+                        topic.getState().put(topic.getShortName() + "-" + DATA, this.nextRecordPrimaryKey.getBytes(), record.value());
+                    }
                     break;
             }
 
@@ -296,6 +300,7 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
      * The callback for Kafka producer writes
      */
     private final Callback producerCallback = new KafkaProducerCallback();
+    private boolean persistent;
 
     @Override
     public void commit() {
@@ -346,6 +351,8 @@ public class KafkaTopic<K, V> extends BaseTopic<K, V> {
         if(!ObjectUtils.equals(spConfig.get(ProducerConfig.ACKS_CONFIG), "all")) {
             logger.warn("It is recommended to set ACKS to 'all' otherwise data loss can occur");
         }
+
+        this.persistent = (Boolean)spConfig.getOrDefault(PERSISTENT, PERSISTENT_DEFAULT);
     }
 
     @Override

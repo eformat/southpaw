@@ -15,15 +15,15 @@
  */
 package com.jwplayer.southpaw.topic;
 
-import com.jwplayer.southpaw.util.ByteArray;
-import com.jwplayer.southpaw.topic.TopicConfig;
-import com.jwplayer.southpaw.filter.BaseFilter;
-import com.jwplayer.southpaw.state.BaseState;
-import com.jwplayer.southpaw.metric.Metrics;
+import java.util.Iterator;
+
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.serialization.Serde;
 
-import java.util.Iterator;
+import com.jwplayer.southpaw.filter.BaseFilter;
+import com.jwplayer.southpaw.metric.Metrics;
+import com.jwplayer.southpaw.state.BaseState;
+import com.jwplayer.southpaw.util.ByteArray;
 
 
 /**
@@ -189,6 +189,7 @@ public abstract class BaseTopic<K, V> {
      * Gives a nicely formatted string representation of this object. Useful for the Intellij debugger.
      * @return Formatted string representation of this object
      */
+    @Override
     public String toString() {
         return String.format(
                 "{shortName=%s,topicName=%s,currentOffset=%s,keySerde=%s,valueSerde=%s}",
@@ -206,4 +207,8 @@ public abstract class BaseTopic<K, V> {
      * @param value - The serialized value.
      */
     public abstract void write(K key, V value);
+
+    public String getTableName() {
+        return null; //could be used to refine the table name mapping
+    }
 }

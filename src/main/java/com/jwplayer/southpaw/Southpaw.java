@@ -153,7 +153,7 @@ public class Southpaw {
      */
     protected BaseState state;
 
-    protected String topicPrefix = "dbserver1";
+    protected boolean topicsPrefixed;
     private static final String TRANSACTIONS = "transactions";
 
     /**
@@ -226,6 +226,7 @@ public class Southpaw {
             this.metrics.registerOutputTopic(root.getDenormalizedName());
         }
         this.inputTopics.put(TRANSACTIONS, createTopic(TRANSACTIONS));
+        this.topicsPrefixed = (Boolean) rawConfig.getOrDefault("topics.prefixed", true);
         for(Map.Entry<String, BaseTopic<BaseRecord, BaseRecord>> entry: this.inputTopics.entrySet()) {
             this.metrics.registerInputTopic(entry.getKey());
         }
@@ -302,8 +303,15 @@ public class Southpaw {
 
         PriorityQueue<RecordHolder> topicsByTime = new PriorityQueue<>();
         Set<String> toInitialize = new HashSet<>(inputTopics.keySet());
-        Map<String, String> topicToAlias = new HashMap<>();
-        inputTopics.entrySet().stream().forEach((e) -> topicToAlias.put(e.getValue().getTopicName(), e.getKey()));
+        Map<String, String> tablesToAlias = new HashMap<>();
+        inputTopics.entrySet().stream().forEach((e) -> {
+            String tableName = e.getValue().getTableName();
+            if (tableName == null) {
+                tableName = e.getValue().getTopicName();
+                tableName = topicsPrefixed?tableName.substring(tableName.indexOf('.')+1):tableName;
+            }
+            tablesToAlias.put(tableName, e.getKey());
+        });
 
         Long lastTime = null;
         //TODO: could combine with the record holders
@@ -327,10 +335,6 @@ public class Southpaw {
                     topicsByTime.add(holder);
                     toInitialize.remove(entity);
                 }
-            }
-
-            if (topicsByTime.isEmpty()) {
-                continue; //poll again
             }
 
             while (!topicsByTime.isEmpty()) {
@@ -363,7 +367,7 @@ public class Southpaw {
                         if (dataCollections != null) {
                             for (Map<String, ?> dataCollection : dataCollections) {
                                 String topic = (String)dataCollection.get("data_collection");
-                                String alias = topicToAlias.get(topicPrefix + "." + topic);
+                                String alias = tablesToAlias.get(topic);
                                 if (alias == null) {
                                     continue; //not involved
                                 }
@@ -418,17 +422,17 @@ public class Southpaw {
                 if (txnEvent) {
                     if (flush) {
                         //commitOrBackup at the end of the txn so that we don't need can
-                        //start fresh
+                        //start fresh - has the loop exit like the old code
                         if (commitOrBackup(runTimeS, backupWatch, runWatch, commitWatch)) {
                             return;
                         }
-                        if (dePKsByType.values().stream().anyMatch((b)->!b.isEmpty())) {
-                            //output if anything has been modified
-                            logger.info("flushing values at transaction end");
-                            break; //to the end of the loop
+                        // Create the denormalized records that have been queued up
+                        for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
+                            createDenormalizedRecords(entry.getKey(), entry.getValue());
+                            entry.getValue().clear();
                         }
                     }
-                    continue;
+                    continue; // don't enter the denormalized processing loop
                 }
 
                 String entity = holder.entity;
@@ -488,12 +492,6 @@ public class Southpaw {
 
                 reportRecordsToCreate();
                 reportTotalLag();
-            }
-
-            // Create the denormalized records that have been queued up
-            for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
-                createDenormalizedRecords(entry.getKey(), entry.getValue());
-                entry.getValue().clear();
             }
         }
         commit();
@@ -659,6 +657,10 @@ public class Southpaw {
     protected void createDenormalizedRecords(
             Relation root,
             Set<ByteArray> rootRecordPKs) {
+        if (rootRecordPKs.isEmpty()) {
+            return;
+        }
+        logger.info("creating " + rootRecordPKs.size() + " " + root.getEntity());
         for(ByteArray dePrimaryKey: rootRecordPKs) {
             if(dePrimaryKey != null) {
                 BaseTopic<byte[], DenormalizedRecord> outputTopic = outputTopics.get(root.getDenormalizedName());
