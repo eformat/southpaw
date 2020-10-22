@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.TreeMap;
@@ -337,13 +338,15 @@ public class Southpaw {
                 }
             }
 
+            long topicLag = 0;
+            boolean flush = false;
             while (!topicsByTime.isEmpty()) {
                 RecordHolder holder = topicsByTime.peek();
 
                 System.out.println(holder.entity + " " + holder.time + " " + holder.records.peekValue());
 
-                boolean flush = false;
                 boolean txnEvent = false;
+                flush = false;
 
                 if (holder.entity.equals(TRANSACTIONS)) {
                     txnEvent = true;
@@ -362,7 +365,6 @@ public class Southpaw {
                         if (!holder.txn.equals(txn)) {
                             throw new AssertionError("Unexpected end of transaction");
                         }
-                        //TODO: check the data_collections against the transactionEvents;
                         List<Map<String, ?>> dataCollections = (List<Map<String, ?>>) holder.records.peekValue().get("data_collections");
                         if (dataCollections != null) {
                             for (Map<String, ?> dataCollection : dataCollections) {
@@ -388,14 +390,15 @@ public class Southpaw {
                         logger.debug("closing transaction " + holder.txn);
                     }
                 } else {
-                    if (txn == null) {
+                    if (!Objects.equals(txn, holder.txn)) {
                         if (toInitialize.contains(TRANSACTIONS)) {
                             //probe again to know what transaction to start
-                            logger.info("waiting for transaction begin");
+                            logger.info("waiting for transaction event");
                             continue probe; //TODO: probe only txn, and only do this a limited number of times
                         }
-                        //assume it's some kind of implicit transaction?
-                        txn = holder.txn;
+                        throw new AssertionError("unexpected transaction " + holder.txn);
+                    } else if (txn == null) {
+                        flush = true;
                     }
                     transactionEvents.compute(holder.entity, (k, v)->v==null?1:v+1);
                 }
@@ -420,22 +423,15 @@ public class Southpaw {
                 }
 
                 if (txnEvent) {
-                    if (flush) {
-                        //commitOrBackup at the end of the txn so that we don't need can
-                        //start fresh - has the loop exit like the old code
-                        if (commitOrBackup(runTimeS, backupWatch, runWatch, commitWatch)) {
-                            return;
-                        }
-                        // Create the denormalized records that have been queued up
-                        for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
-                            createDenormalizedRecords(entry.getKey(), entry.getValue());
-                            entry.getValue().clear();
-                        }
+                    if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch, true)) {
+                        return;
                     }
                     continue; // don't enter the denormalized processing loop
                 }
 
                 String entity = holder.entity;
+                topicLag = inputTopics.get(entity).getLag();
+                metrics.topicLagByTopic.get(entity).update(topicLag);
 
                 ByteArray primaryKey = newRecord.key().toByteArray();
                 for (Relation root : relations) {
@@ -480,11 +476,10 @@ public class Southpaw {
                         }
                     }
                     int size = dePrimaryKeys.size();
-                    //TODO: could need handling of this case transactionally
-                    /*if(size > config.createRecordsTrigger) {
+                    if(flush && size > config.createRecordsTrigger) {
                         createDenormalizedRecords(root, dePrimaryKeys);
                         dePrimaryKeys.clear();
-                    }*/
+                    }
                     metrics.denormalizedRecordsToCreateByTopic.get(root.getDenormalizedName()).update((long) size);
                 }
                 metrics.recordsConsumed.mark(1);
@@ -493,11 +488,17 @@ public class Southpaw {
                 reportRecordsToCreate();
                 reportTotalLag();
             }
+            //nothing left to read and we're in a flushable state
+            if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch, topicLag <= config.topicLagTrigger)) {
+                return;
+            }
         }
         commit();
     }
 
-    private boolean commitOrBackup(int runTimeS, StopWatch backupWatch, StopWatch runWatch, StopWatch commitWatch) {
+    private boolean flushCommitBackup(int runTimeS, StopWatch backupWatch, StopWatch runWatch, StopWatch commitWatch, boolean outputDenormalized) {
+        //commitOrBackup at the end of the txn so that we don't need can
+        //start fresh - has the loop exit like the old code
         metrics.timeSinceLastBackup.update(backupWatch.getTime());
         if(
                 (config.backupTimeS > 0 && backupWatch.getTime() > config.backupTimeS * 1000)
@@ -520,6 +521,14 @@ public class Southpaw {
                 commit();
                 commitWatch.reset();
                 commitWatch.start();
+            }
+        }
+
+        if (outputDenormalized) {
+            // Create the denormalized records that have been queued up
+            for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
+                createDenormalizedRecords(entry.getKey(), entry.getValue());
+                entry.getValue().clear();
             }
         }
         return false;
