@@ -15,30 +15,6 @@
  */
 package com.jwplayer.southpaw;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.AbstractMap;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.PriorityQueue;
-import java.util.Set;
-import java.util.TreeMap;
-
-import org.apache.commons.lang.ObjectUtils;
-import org.apache.commons.lang.time.StopWatch;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.common.serialization.Serde;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.yaml.snakeyaml.Yaml;
-
 import com.codahale.metrics.Timer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
@@ -66,6 +42,21 @@ import com.jwplayer.southpaw.util.FileHelper;
 
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
+import org.apache.commons.lang.ObjectUtils;
+import org.apache.commons.lang.time.StopWatch;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.serialization.Serde;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.yaml.snakeyaml.Yaml;
+
+
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.*;
+import java.util.stream.Collectors;
 
 
 /**
@@ -163,24 +154,31 @@ public class Southpaw {
     protected static class Config {
         public static final String BACKUP_TIME_S_CONFIG = "backup.time.s";
         public static final int BACKUP_TIME_S_DEFAULT = 1800;
-        public static final String BACKUP_TIME_S_DOC = "Time interval (roughly) between backups";
         public static final String COMMIT_TIME_S_CONFIG = "commit.time.s";
         public static final int COMMIT_TIME_S_DEFAULT = 0;
-        public static final String COMMIT_TIME_S_DOC = "Time interval (roughly) between commits";
         public static final String CREATE_RECORDS_TRIGGER_CONFIG = "create.records.trigger";
         public static final int CREATE_RECORDS_TRIGGER_DEFAULT = 250000;
-        public static final String CREATE_RECORDS_TRIGGER_DOC =
-                "Config for when to create denormalized records once the number of records to create has exceeded " +
-                        "a certain amount";
         public static final String TOPIC_LAG_TRIGGER_CONFIG = "topic.lag.trigger";
         public static final String TOPIC_LAG_TRIGGER_DEFAULT = "1000";
-        public static final String TOPIC_LAG_TRIGGER_DOC =
-                "Config for when to switch from one topic to the next (or to stop processing a topic entirely), " +
-                        "when lag drops below this value.";
 
+        /**
+         * Time interval (roughly) between backups
+         */
         public int backupTimeS;
+
+        /**
+         * Time interval (roughly) between commits
+         */
         public int commitTimeS;
+
+        /**
+         * Config for when to create denormalized records once the number of records to create has exceeded a certain amount
+         */
         public int createRecordsTrigger;
+
+        /**
+         * Config for when to switch from one topic to the next (or to stop processing a topic entirely), when lag drops below this value
+         */
         public int topicLagTrigger;
 
         public Config(Map<String, Object> rawConfig) throws ClassNotFoundException {
@@ -200,7 +198,7 @@ public class Southpaw {
      * @throws URISyntaxException -
      */
     public Southpaw(Map<String, Object> rawConfig, List<URI> relations)
-            throws ClassNotFoundException, IllegalAccessException, InstantiationException, IOException, URISyntaxException {
+            throws ClassNotFoundException, IllegalAccessException, InstantiationException, IOException, URISyntaxException, NoSuchMethodException, InvocationTargetException {
         this(rawConfig, loadRelations(Preconditions.checkNotNull(relations)));
     }
 
@@ -210,7 +208,7 @@ public class Southpaw {
      * @param relations - The top level relations that define the denormalized objects to construct
      */
     public Southpaw(Map<String, Object> rawConfig, Relation[] relations)
-            throws ClassNotFoundException, IllegalAccessException, InstantiationException {
+            throws ClassNotFoundException, IllegalAccessException, InstantiationException, NoSuchMethodException, InvocationTargetException {
         validateRootRelations(relations);
 
         this.rawConfig = Preconditions.checkNotNull(rawConfig);
@@ -774,7 +772,7 @@ public class Southpaw {
      * @return A map of topics
      */
     protected Map<String, BaseTopic<BaseRecord, BaseRecord>> createInputTopics(Relation relation)
-            throws ClassNotFoundException, IllegalAccessException, InstantiationException {
+            throws ClassNotFoundException, IllegalAccessException, InstantiationException, NoSuchMethodException, InvocationTargetException {
         Map<String, BaseTopic<BaseRecord, BaseRecord>> topics = new HashMap<>();
 
         topics.put(relation.getEntity(), createTopic(relation.getEntity()));
@@ -798,12 +796,12 @@ public class Southpaw {
      */
     @SuppressWarnings("unchecked")
     protected BaseTopic<byte[], DenormalizedRecord> createOutputTopic(String shortName)
-            throws ClassNotFoundException, IllegalAccessException, InstantiationException {
+            throws ClassNotFoundException, IllegalAccessException, InstantiationException, NoSuchMethodException, InvocationTargetException {
         Map<String, Object> topicConfig = createTopicConfig(shortName);
         Class keySerdeClass = Class.forName(Preconditions.checkNotNull(topicConfig.get(BaseTopic.KEY_SERDE_CLASS_CONFIG).toString()));
         Class valueSerdeClass = Class.forName(Preconditions.checkNotNull(topicConfig.get(BaseTopic.VALUE_SERDE_CLASS_CONFIG).toString()));
-        Serde<byte[]> keySerde = (Serde<byte[]>) keySerdeClass.newInstance();
-        Serde<DenormalizedRecord> valueSerde = (Serde<DenormalizedRecord>) valueSerdeClass.newInstance();
+        Serde<byte[]> keySerde = (Serde<byte[]>) keySerdeClass.getDeclaredConstructor().newInstance();
+        Serde<DenormalizedRecord> valueSerde = (Serde<DenormalizedRecord>) valueSerdeClass.getDeclaredConstructor().newInstance();
         return createTopic(
                 shortName,
                 topicConfig,
@@ -834,14 +832,14 @@ public class Southpaw {
      */
     @SuppressWarnings("unchecked")
     protected <K extends BaseRecord, V extends BaseRecord> BaseTopic<K, V> createTopic(String shortName)
-            throws ClassNotFoundException, IllegalAccessException, InstantiationException {
+            throws ClassNotFoundException, IllegalAccessException, InstantiationException, NoSuchMethodException, InvocationTargetException {
         Map<String, Object> topicConfig = createTopicConfig(shortName);
         Class keySerdeClass = Class.forName(Preconditions.checkNotNull(topicConfig.get(BaseTopic.KEY_SERDE_CLASS_CONFIG).toString()));
         Class valueSerdeClass = Class.forName(Preconditions.checkNotNull(topicConfig.get(BaseTopic.VALUE_SERDE_CLASS_CONFIG).toString()));
         Class filterClass = Class.forName(topicConfig.getOrDefault(BaseTopic.FILTER_CLASS_CONFIG, BaseTopic.FILTER_CLASS_DEFAULT).toString());
-        BaseSerde<K> keySerde = (BaseSerde<K>) keySerdeClass.newInstance();
-        BaseSerde<V> valueSerde = (BaseSerde<V>) valueSerdeClass.newInstance();
-        BaseFilter filter = (BaseFilter) filterClass.newInstance();
+        BaseSerde<K> keySerde = (BaseSerde<K>) keySerdeClass.getDeclaredConstructor().newInstance();
+        BaseSerde<V> valueSerde = (BaseSerde<V>) valueSerdeClass.getDeclaredConstructor().newInstance();
+        BaseFilter filter = (BaseFilter) filterClass.getDeclaredConstructor().newInstance();
         return createTopic(
                 shortName,
                 topicConfig,
@@ -870,9 +868,9 @@ public class Southpaw {
             Serde<K> keySerde,
             Serde<V> valueSerde,
             BaseFilter filter,
-            Metrics metrics) throws ClassNotFoundException, IllegalAccessException, InstantiationException {
+            Metrics metrics) throws ClassNotFoundException, IllegalAccessException, InstantiationException, NoSuchMethodException, InvocationTargetException {
         Class topicClass = Class.forName(Preconditions.checkNotNull(southpawConfig.get(BaseTopic.TOPIC_CLASS_CONFIG).toString()));
-        BaseTopic<K, V> topic = (BaseTopic<K, V>) topicClass.newInstance();
+        BaseTopic<K, V> topic = (BaseTopic<K, V>) topicClass.getDeclaredConstructor().newInstance();
         keySerde.configure(southpawConfig, true);
         valueSerde.configure(southpawConfig, false);
         filter.configure(southpawConfig);
@@ -959,7 +957,6 @@ public class Southpaw {
     public static void main(String args[]) throws Exception {
         String BUILD = "build";
         String CONFIG = "config";
-        String DEBUG = "debug";
         String DELETE_BACKUP = "delete-backup";
         String DELETE_STATE = "delete-state";
         String HELP = "help";
