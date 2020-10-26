@@ -15,6 +15,31 @@
  */
 package com.jwplayer.southpaw;
 
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.PriorityQueue;
+import java.util.Set;
+import java.util.TreeMap;
+
+import org.apache.commons.lang.ObjectUtils;
+import org.apache.commons.lang.time.StopWatch;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.serialization.Serde;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.yaml.snakeyaml.Yaml;
+
 import com.codahale.metrics.Timer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
@@ -42,21 +67,6 @@ import com.jwplayer.southpaw.util.FileHelper;
 
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
-import org.apache.commons.lang.ObjectUtils;
-import org.apache.commons.lang.time.StopWatch;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.common.serialization.Serde;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.yaml.snakeyaml.Yaml;
-
-
-import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.*;
-import java.util.stream.Collectors;
 
 
 /**
@@ -251,7 +261,7 @@ public class Southpaw {
 
         boolean peek() {
             if (records.hasNext()) {
-                ConsumerRecord<byte[], byte[]> record = records.peekRawConsumerRecord();
+                ConsumerRecord<?, ?> record = records.peekRawConsumerRecord();
                 BaseRecord baseRecord = records.peekValue();
                 //take the time as the message, which should work whether txn metadata is available or not
                 this.time = record.timestamp();
@@ -263,13 +273,16 @@ public class Southpaw {
                         order = Long.MAX_VALUE;
                     }
                     txn = (String)baseRecord.get("id");
-                } else {
+                } else if (baseRecord != null) {
                     //since the full envelope is the metadata, we could use other notions of time
                     //ts_ms, source.ts_, or even something from the before/after
-                    Map<String, ?> transaction = (Map<String, ?>) baseRecord.getMetadata().get("transaction");
-                    if (transaction != null) {
-                        this.order = ((Number)transaction.get("total_order")).longValue();
-                        txn = (String)transaction.get("id");
+                    Map<String, ?> metadata = baseRecord.getMetadata();
+                    if (metadata != null) {
+                        Map<String, ?> transaction = (Map<String, ?>) metadata.get("transaction");
+                        if (transaction != null) {
+                            this.order = ((Number)transaction.get("total_order")).longValue();
+                            txn = (String)transaction.get("id");
+                        }
                     }
                 }
                 return true;
@@ -344,18 +357,18 @@ public class Southpaw {
             }
 
             long topicLag = 0;
-            boolean flush = false;
+            boolean flush = true;
             while (!topicsByTime.isEmpty()) {
                 RecordHolder holder = topicsByTime.peek();
-
-                System.out.println(holder.entity + " " + holder.time + " " + holder.records.peekValue());
+                String entity = holder.entity;
 
                 boolean txnEvent = false;
                 flush = false;
 
-                if (holder.entity.equals(TRANSACTIONS)) {
+                if (entity.equals(TRANSACTIONS)) {
                     txnEvent = true;
-                    Object status = holder.records.peekValue().get("status");
+                    BaseRecord peekValue = holder.records.peekValue();
+                    Object status = peekValue.get("status");
                     if ("BEGIN".equals(status)) {
                         transactionEvents.clear();
                         if (txn != null && !explicitTxn) {
@@ -370,7 +383,7 @@ public class Southpaw {
                         if (!holder.txn.equals(txn)) {
                             throw new AssertionError("Unexpected end of transaction");
                         }
-                        List<Map<String, ?>> dataCollections = (List<Map<String, ?>>) holder.records.peekValue().get("data_collections");
+                        List<Map<String, ?>> dataCollections = (List<Map<String, ?>>) peekValue.get("data_collections");
                         if (dataCollections != null) {
                             for (Map<String, ?> dataCollection : dataCollections) {
                                 String topic = (String)dataCollection.get("data_collection");
@@ -405,7 +418,7 @@ public class Southpaw {
                     } else if (txn == null) {
                         flush = true;
                     }
-                    transactionEvents.compute(holder.entity, (k, v)->v==null?1:v+1);
+                    transactionEvents.compute(entity, (k, v)->v==null?1:v+1);
                 }
 
                 long current = holder.time;
@@ -424,7 +437,7 @@ public class Southpaw {
                 if (holder.peek()) {
                     topicsByTime.add(holder);
                 } else {
-                    toInitialize.add(holder.entity);
+                    toInitialize.add(entity);
                 }
 
                 if (txnEvent) {
@@ -434,7 +447,6 @@ public class Southpaw {
                     continue; // don't enter the denormalized processing loop
                 }
 
-                String entity = holder.entity;
                 topicLag = inputTopics.get(entity).getLag();
                 metrics.topicLagByTopic.get(entity).update(topicLag);
 
