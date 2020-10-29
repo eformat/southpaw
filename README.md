@@ -151,6 +151,7 @@ The config is broken up into multiple sections:
 * create.records.trigger - Number of denormalized record create actions to queue before creating denormalized records. Only queues creation of records when lagging. 
 * index.lru.cache.size - The number of index entries to cache in memory 
 * index.write.batch.size - The number of entries each index holds in memory before flushing to the state
+* total.lag.trigger - Southpaw will keep processing records until lag falls below a certain threshold. This is for performance purposes. This option controls that threshold.
 
 ### RocksDB Config
 
@@ -203,6 +204,7 @@ Similar to the state, Southpaw is built around Kafka for the log store. The topi
     commit.time.s: 120
     create.records.trigger: 1000000
     index.write.batch.size: 25000
+    total.lag.trigger: 100
 
     rocks.db.backup.uri: "file:///tmp/RocksDB/southpawBackup"
     rocks.db.backups.to.keep: 5

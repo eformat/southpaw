@@ -4,6 +4,7 @@ commit.time.s: 0
 create.records.trigger: 1000000
 index.lru.cache.size: 1500
 index.write.batch.size: 1500
+total.lag.trigger: 100
 
 rocks.db.backup.uri: "file:///tmp/RocksDB/southpaw/backups"
 rocks.db.backups.to.keep: 2

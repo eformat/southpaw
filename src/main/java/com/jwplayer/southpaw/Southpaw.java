@@ -170,6 +170,8 @@ public class Southpaw {
         public static final int COMMIT_TIME_S_DEFAULT = 0;
         public static final String CREATE_RECORDS_TRIGGER_CONFIG = "create.records.trigger";
         public static final int CREATE_RECORDS_TRIGGER_DEFAULT = 250000;
+        public static final String TOTAL_LAG_TRIGGER_CONFIG = "total.lag.trigger";
+        public static final int TOTAL_LAG_TRIGGER_DEFAULT = 2000;
 
         /**
          * Time interval (roughly) between backups
@@ -186,10 +188,16 @@ public class Southpaw {
          */
         public int createRecordsTrigger;
 
+        /**
+         * Config for when to switch from one topic to the next (or to stop processing a topic entirely), when lag drops below this value
+         */
+        public int totalLagTrigger;
+
         public Config(Map<String, Object> rawConfig) throws ClassNotFoundException {
             this.backupTimeS = (int) rawConfig.getOrDefault(BACKUP_TIME_S_CONFIG, BACKUP_TIME_S_DEFAULT);
             this.commitTimeS = (int) rawConfig.getOrDefault(COMMIT_TIME_S_CONFIG, COMMIT_TIME_S_DEFAULT);
             this.createRecordsTrigger = (int) rawConfig.getOrDefault(CREATE_RECORDS_TRIGGER_CONFIG, CREATE_RECORDS_TRIGGER_DEFAULT);
+            this.totalLagTrigger = (int) rawConfig.getOrDefault(TOTAL_LAG_TRIGGER_CONFIG, TOTAL_LAG_TRIGGER_DEFAULT);
         }
     }
 
@@ -456,7 +464,7 @@ public class Southpaw {
                 }
 
                 if (txnEvent) {
-                    if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch)) {
+                    if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch, true)) {
                         return; //TODO: could skip flushing if there are pending txn events
                     }
                     continue; // don't enter the denormalized processing loop
@@ -520,16 +528,19 @@ public class Southpaw {
                 reportRecordsToCreate();
                 reportTotalLag();
             }
+
             //nothing left to read and we're in a flushable state
-            //TODO: could add a min flush interval or similar based upon total lag to skip
-            if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch)) {
-                return;
+            if (flush) {
+                Long totalLag = metrics.topicLag.getValue();
+                if (flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch, totalLag == null || totalLag < config.totalLagTrigger)) {
+                    return;
+                }
             }
         }
         commit();
     }
 
-    private boolean flushCommitBackup(int runTimeS, StopWatch backupWatch, StopWatch runWatch, StopWatch commitWatch) {
+    private boolean flushCommitBackup(int runTimeS, StopWatch backupWatch, StopWatch runWatch, StopWatch commitWatch, boolean createDenormalized) {
         //commitOrBackup at the end of the txn so that we don't need can
         //start fresh - has the loop exit like the old code
         metrics.timeSinceLastBackup.update(backupWatch.getTime());
@@ -557,10 +568,12 @@ public class Southpaw {
             }
         }
 
-        // Create the denormalized records that have been queued up
-        for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
-            createDenormalizedRecords(entry.getKey(), entry.getValue());
-            entry.getValue().clear();
+        if (createDenormalized) {
+            // Create the denormalized records that have been queued up
+            for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
+                createDenormalizedRecords(entry.getKey(), entry.getValue());
+                entry.getValue().clear();
+            }
         }
         return false;
     }
