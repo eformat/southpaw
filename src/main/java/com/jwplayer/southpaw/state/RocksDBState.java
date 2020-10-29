@@ -508,10 +508,11 @@ public class RocksDBState extends BaseState {
     @Override
     public void delete(String keySpace, byte[] key) {
         ByteArray handleName = new ByteArray(keySpace);
-        Preconditions.checkNotNull(cfHandles.get(handleName));
+        ColumnFamilyHandle handle = cfHandles.get(handleName);
+        Preconditions.checkNotNull(handle);
         try {
             dataBatches.get(handleName).remove(new ByteArray(key));
-            rocksDB.delete(cfHandles.get(handleName), writeOptions, key);
+            rocksDB.delete(handle, writeOptions, key);
         } catch(RocksDBException ex) {
             logger.error("Problem deleting RocksDB record, keySpace: " + keySpace + ", key: " + Hex.encodeHexString(key));
             throw new RuntimeException(ex);
@@ -571,11 +572,11 @@ public class RocksDBState extends BaseState {
     @Override
     public byte[] get(String keySpace, byte[] key) {
         ByteArray handleName = new ByteArray(keySpace);
-        Preconditions.checkNotNull(cfHandles.get(handleName));
+        ColumnFamilyHandle handle = Preconditions.checkNotNull(cfHandles.get(handleName));
         try {
             byte[] retVal = dataBatches.get(new ByteArray(keySpace)).get(new ByteArray(key));
             if(retVal == null) {
-                retVal = rocksDB.get(cfHandles.get(handleName), key);
+                retVal = rocksDB.get(handle, key);
             }
             return retVal;
         } catch(RocksDBException ex) {
@@ -603,8 +604,8 @@ public class RocksDBState extends BaseState {
         // NOTE: This only iterates RocksDB, not the appropriate data batch. Call flush first if
         // you need to iterate everything.
         ByteArray handleName = new ByteArray(keySpace);
-        Preconditions.checkNotNull(cfHandles.get(handleName));
-        Iterator iterator = new Iterator(rocksDB.newIterator(cfHandles.get(handleName)));
+        ColumnFamilyHandle handle = Preconditions.checkNotNull(cfHandles.get(handleName));
+        Iterator iterator = new Iterator(rocksDB.newIterator(handle));
         iterators.add(iterator);
         return iterator;
     }
@@ -612,11 +613,9 @@ public class RocksDBState extends BaseState {
     @Override
     public void put(String keySpace, byte[] key, byte[] value) {
         Preconditions.checkNotNull(key);
+        Preconditions.checkNotNull(value);
         ByteArray byteArray = new ByteArray(keySpace);
         Map<ByteArray, byte[]> dataBatch = Preconditions.checkNotNull(dataBatches.get(byteArray));
-        if (value == null) {
-            throw new AssertionError();
-        }
         dataBatch.put(new ByteArray(key), value);
         if(dataBatch.size() >= putBatchSize) {
             putBatch(byteArray);

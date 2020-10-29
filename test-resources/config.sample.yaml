@@ -4,7 +4,6 @@ commit.time.s: 60
 create.records.trigger: 1
 index.lru.cache.size: 1
 index.write.batch.size: 3
-topic.lag.trigger: 1000000
 
 rocks.db.backup.uri: "file:///tmp/RocksDB/testBackup"
 rocks.db.backups.to.keep: 5
@@ -27,7 +26,6 @@ topics:
     filter.class: "com.jwplayer.southpaw.filter.TestFilter"
     group.id: "southpaw"
     key.serde.class: "com.jwplayer.southpaw.serde.JsonSerde"
-    poll.timeout: 100
     schema.registry.url: "http://schema-registry:8081"
     topic.class: "com.jwplayer.southpaw.topic.InMemoryTopic"
     value.serde.class: "com.jwplayer.southpaw.serde.JsonSerde"

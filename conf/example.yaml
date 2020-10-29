@@ -4,7 +4,6 @@ commit.time.s: 0
 create.records.trigger: 1000000
 index.lru.cache.size: 1500
 index.write.batch.size: 1500
-topic.lag.trigger: 100
 
 rocks.db.backup.uri: "file:///tmp/RocksDB/southpaw/backups"
 rocks.db.backups.to.keep: 2
@@ -32,7 +31,6 @@ topics:
     group.id: "southpaw"
     enable.auto.commit: false
     key.serde.class: "com.jwplayer.southpaw.serde.AvroSerde"
-    poll.timeout: 100
     schema.registry.url: "http://schema_registry_url:80"
     topic.class: "com.jwplayer.southpaw.topic.KafkaTopic"
     value.serde.class: "com.jwplayer.southpaw.serde.AvroSerde"

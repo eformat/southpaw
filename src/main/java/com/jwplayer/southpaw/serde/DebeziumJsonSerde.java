@@ -3,6 +3,7 @@ package com.jwplayer.southpaw.serde;
 import java.util.Collections;
 import java.util.Map;
 
+import org.apache.commons.lang.NotImplementedException;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serializer;
 
@@ -36,7 +37,7 @@ public class DebeziumJsonSerde implements BaseSerde<BaseRecord> {
 
     @Override
     public Serializer<BaseRecord> serializer() {
-        throw new UnsupportedOperationException();
+        throw new NotImplementedException();
     }
 
     @Override
@@ -64,12 +65,12 @@ public class DebeziumJsonSerde implements BaseSerde<BaseRecord> {
 
             @Override
             public void configure(Map<String, ?> configs, boolean isKey) {
-                throw new UnsupportedOperationException();
+                throw new NotImplementedException();
             }
 
             @Override
             public void close() {
-                throw new UnsupportedOperationException();
+                throw new NotImplementedException();
             }
         };
     }

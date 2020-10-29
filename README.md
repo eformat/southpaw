@@ -151,7 +151,6 @@ The config is broken up into multiple sections:
 * create.records.trigger - Number of denormalized record create actions to queue before creating denormalized records. Only queues creation of records when lagging. 
 * index.lru.cache.size - The number of index entries to cache in memory 
 * index.write.batch.size - The number of entries each index holds in memory before flushing to the state
-* topic.lag.trigger - Southpaw will stick to a single topic until it falls below a certain lag threshold before switching to the next topic. This is for performance purposes. This option controls that threshold.
 
 ### RocksDB Config
 
@@ -194,7 +193,6 @@ Similar to the state, Southpaw is built around Kafka for the log store. The topi
 
 * jackson.serde.class - The full class name of the deserialized object created by the JacksonSerde class
 * key.serde.class - The full name of the serde class for the record key
-* poll.timeout - The Kafka consumer poll() timeout in milliseconds
 * topic.class - The full class name of the class used by the topic
 * topic.name - The name of the topic (not the entity name for this topic!)
 * value.serde.class - The full name of the serde class for the record value
@@ -205,7 +203,6 @@ Similar to the state, Southpaw is built around Kafka for the log store. The topi
     commit.time.s: 120
     create.records.trigger: 1000000
     index.write.batch.size: 25000
-    topic.lag.trigger: 100
 
     rocks.db.backup.uri: "file:///tmp/RocksDB/southpawBackup"
     rocks.db.backups.to.keep: 5
@@ -223,7 +220,6 @@ Similar to the state, Southpaw is built around Kafka for the log store. The topi
         client.id: "southpaw"
         enable.auto.commit: false
         key.serde.class: "com.jwplayer.southpaw.serde.AvroSerde"
-        poll.timeout: 100
         schema.registry.url: "http://my-schema-registry:8081"
         topic.class: "com.jwplayer.southpaw.topic.KafkaTopic"
         value.serde.class: "com.jwplayer.southpaw.serde.AvroSerde"

@@ -108,6 +108,11 @@ public final class InMemoryTopic<K, V> extends BaseTopic<K, V> {
             int index = 0;
 
             @Override
+            public int getApproximateCount() {
+                return retVal.size();
+            }
+
+            @Override
             public boolean hasNext() {
                 return index < retVal.size();
             }

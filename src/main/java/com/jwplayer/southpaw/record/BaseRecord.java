@@ -86,6 +86,10 @@ public abstract class BaseRecord {
         return toMap().toString();
     }
 
+    /**
+     * Metadata associated with the record to be used in initial processing decisions.
+     * @return
+     */
     public Map<String, ?> getMetadata() {
         return metadata;
     }

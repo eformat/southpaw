@@ -158,6 +158,8 @@ public class Southpaw {
     protected boolean topicsPrefixed;
     private static final String TRANSACTIONS = "transactions";
 
+    protected String currentTxn;
+
     /**
      * Base Southpaw config
      */
@@ -168,8 +170,6 @@ public class Southpaw {
         public static final int COMMIT_TIME_S_DEFAULT = 0;
         public static final String CREATE_RECORDS_TRIGGER_CONFIG = "create.records.trigger";
         public static final int CREATE_RECORDS_TRIGGER_DEFAULT = 250000;
-        public static final String TOPIC_LAG_TRIGGER_CONFIG = "topic.lag.trigger";
-        public static final String TOPIC_LAG_TRIGGER_DEFAULT = "1000";
 
         /**
          * Time interval (roughly) between backups
@@ -186,16 +186,10 @@ public class Southpaw {
          */
         public int createRecordsTrigger;
 
-        /**
-         * Config for when to switch from one topic to the next (or to stop processing a topic entirely), when lag drops below this value
-         */
-        public int topicLagTrigger;
-
         public Config(Map<String, Object> rawConfig) throws ClassNotFoundException {
             this.backupTimeS = (int) rawConfig.getOrDefault(BACKUP_TIME_S_CONFIG, BACKUP_TIME_S_DEFAULT);
             this.commitTimeS = (int) rawConfig.getOrDefault(COMMIT_TIME_S_CONFIG, COMMIT_TIME_S_DEFAULT);
             this.createRecordsTrigger = (int) rawConfig.getOrDefault(CREATE_RECORDS_TRIGGER_CONFIG, CREATE_RECORDS_TRIGGER_DEFAULT);
-            this.topicLagTrigger = (int) rawConfig.getOrDefault(TOPIC_LAG_TRIGGER_CONFIG, TOPIC_LAG_TRIGGER_DEFAULT);
         }
     }
 
@@ -252,12 +246,18 @@ public class Southpaw {
         }
     }
 
-    static class RecordHolder implements Comparable<RecordHolder> {
+    class RecordHolder implements Comparable<RecordHolder> {
+        String entity;
+        ConsumerRecordIterator<BaseRecord, BaseRecord> records;
+
         long time;
         long order;
-        String entity;
         String txn;
-        ConsumerRecordIterator<BaseRecord, BaseRecord> records;
+
+        public RecordHolder(String entity, ConsumerRecordIterator<BaseRecord, BaseRecord> records) {
+            this.entity = entity;
+            this.records = records;
+        }
 
         boolean peek() {
             if (records.hasNext()) {
@@ -296,6 +296,17 @@ public class Southpaw {
             if (result != 0) {
                 return result;
             }
+            //events of equal time must be ordered by the
+            //current txn if possible - this requires reordering
+            //the queue once the current txn is set
+            if (!Objects.equals(txn, o.txn) && currentTxn != null) {
+                if (currentTxn.equals(txn)) {
+                    return -1;
+                } else if (currentTxn.equals(o.txn)) {
+                    return 1;
+                }
+            }
+            //after the txn, we can consider the order
             result = Long.compare(order, o.order);
             if (result != 0) {
                 return result;
@@ -321,7 +332,7 @@ public class Southpaw {
         commitWatch.start();
 
         PriorityQueue<RecordHolder> topicsByTime = new PriorityQueue<>();
-        Set<String> toInitialize = new HashSet<>(inputTopics.keySet());
+        Set<String> toProbe = new HashSet<>(inputTopics.keySet());
         Map<String, String> tablesToAlias = new HashMap<>();
         inputTopics.entrySet().stream().forEach((e) -> {
             String tableName = e.getValue().getTableName();
@@ -332,55 +343,71 @@ public class Southpaw {
             tablesToAlias.put(tableName, e.getKey());
         });
 
-        Long lastTime = null;
-        //TODO: could combine with the record holders
         Map<String, Integer> transactionEvents = new HashMap<>();
-        String txn = null;
-        boolean explicitTxn = false;
 
         probe: while(processRecords) {
-            for (String entity : new ArrayList<>(toInitialize)) {
+            //TODO: these metrics are computed too often
+            calculateRecordsToCreate();
+            calculateTotalLag();
+
+            boolean foundEarlier = false;
+            boolean foundAny = false;
+            for (Iterator<String> iter = toProbe.iterator(); iter.hasNext();) {
+                String entity = iter.next();
                 BaseTopic<BaseRecord, BaseRecord> inputTopic = inputTopics.get(entity);
 
-                calculateRecordsToCreate();
-                calculateTotalLag();
+                ConsumerRecordIterator<BaseRecord, BaseRecord> records = (ConsumerRecordIterator<BaseRecord, BaseRecord>)inputTopic.readNext();
 
-                Iterator<ConsumerRecord<BaseRecord, BaseRecord>> records = inputTopic.readNext();
-                RecordHolder holder = new RecordHolder();
-                holder.records = (ConsumerRecordIterator<BaseRecord, BaseRecord>)records;
-                holder.entity = entity;
-
-                if (holder.peek()) {
-                    topicsByTime.add(holder);
-                    toInitialize.remove(entity);
+                if (records.getApproximateCount() > 0) {
+                    RecordHolder holder = new RecordHolder(entity,  records);
+                    foundAny = true;
+                    if (holder.peek()) {
+                        topicsByTime.add(holder);
+                        if (!foundEarlier && topicsByTime.peek() == holder) {
+                            foundEarlier = true;
+                        }
+                        iter.remove();
+                    }
                 }
             }
+            if (!foundAny) {
+                try {
+                    //Thread.onSpinWait();
+                    Thread.sleep(5); //prevent a busy wait and keep probing
+                } catch (InterruptedException e1) {
+                    Thread.interrupted();
+                    throw new RuntimeException(e1);
+                }
+                //this could be a tighter loop here, but we need to account for runTimeS
+            }
 
-            long topicLag = 0;
-            boolean flush = true;
-            while (!topicsByTime.isEmpty()) {
+            boolean flush = (currentTxn == null);
+            while (foundEarlier && !topicsByTime.isEmpty()) {
                 RecordHolder holder = topicsByTime.peek();
                 String entity = holder.entity;
 
                 boolean txnEvent = false;
-                flush = false;
 
                 if (entity.equals(TRANSACTIONS)) {
                     txnEvent = true;
                     BaseRecord peekValue = holder.records.peekValue();
                     Object status = peekValue.get("status");
                     if ("BEGIN".equals(status)) {
-                        transactionEvents.clear();
-                        if (txn != null && !explicitTxn) {
-                            flush = true;
+                        if(logger.isDebugEnabled()) {
+                            logger.debug("starting transaction {}", holder.txn);
                         }
-                        if (explicitTxn || (txn != null && !txn.equals(holder.txn))) {
+                        transactionEvents.clear();
+                        if (currentTxn != null) {
                             throw new AssertionError("Unexpected begin of transaction");
                         }
-                        txn = holder.txn;
-                        explicitTxn = true;
+                        currentTxn = holder.txn;
+                        flush = false;
+                        //reorder based upon the current txn
+                        //this was the simplest approach with the existing code structure
+                        //you could of course add more explicit buffering by txn
+                        topicsByTime = new PriorityQueue<>(topicsByTime);
                     } else if ("END".equals(status)) {
-                        if (!holder.txn.equals(txn)) {
+                        if (!holder.txn.equals(currentTxn)) {
                             throw new AssertionError("Unexpected end of transaction");
                         }
                         List<Map<String, ?>> dataCollections = (List<Map<String, ?>>) peekValue.get("data_collections");
@@ -393,42 +420,30 @@ public class Southpaw {
                                 }
                                 Integer count = transactionEvents.get(alias);
                                 if ((count == null || (((Number)dataCollection.get("event_count")).intValue()) > count)) {
-                                    if (toInitialize.contains(alias)) {
-                                        logger.info("waiting for " + alias);
+                                    if (toProbe.contains(alias)) {
+                                        logger.debug("waiting for {}", alias);
                                         continue probe; //TODO: probe only missing, and only do this a limited number of times
                                     }
                                     logger.warn("probes are up-to-date, but events do not line up");
                                 }
                             }
                         }
-
-                        txn = null;
-                        explicitTxn = false;
+                        currentTxn = null;
                         flush = true;  //TODO: could skip if there are pending txn messages
-                        logger.debug("closing transaction " + holder.txn);
+                        if(logger.isDebugEnabled()) {
+                            logger.debug("ending transaction {}", holder.txn);
+                        }
                     }
-                } else {
-                    if (!Objects.equals(txn, holder.txn)) {
-                        if (toInitialize.contains(TRANSACTIONS)) {
+                } else if (holder.txn != null) {
+                    if (!Objects.equals(currentTxn, holder.txn)) {
+                        if (toProbe.contains(TRANSACTIONS)) {
                             //probe again to know what transaction to start
                             logger.info("waiting for transaction event");
-                            continue probe; //TODO: probe only txn, and only do this a limited number of times
+                            continue probe;
                         }
                         throw new AssertionError("unexpected transaction " + holder.txn);
-                    } else if (txn == null) {
-                        flush = true;
                     }
                     transactionEvents.compute(entity, (k, v)->v==null?1:v+1);
-                }
-
-                long current = holder.time;
-                if (lastTime == null) {
-                    lastTime = current;
-                } else {
-                    if (current < lastTime) {
-                        logger.warn("Considering an out of order event");
-                    }
-                    lastTime = current;
                 }
 
                 //advance the topic
@@ -437,17 +452,17 @@ public class Southpaw {
                 if (holder.peek()) {
                     topicsByTime.add(holder);
                 } else {
-                    toInitialize.add(entity);
+                    toProbe.add(entity);
                 }
 
                 if (txnEvent) {
-                    if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch, true)) {
-                        return;
+                    if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch)) {
+                        return; //TODO: could skip flushing if there are pending txn events
                     }
                     continue; // don't enter the denormalized processing loop
                 }
 
-                topicLag = inputTopics.get(entity).getLag();
+                long topicLag = inputTopics.get(entity).getLag();
                 metrics.topicLagByTopic.get(entity).update(topicLag);
 
                 ByteArray primaryKey = newRecord.key().toByteArray();
@@ -506,14 +521,15 @@ public class Southpaw {
                 reportTotalLag();
             }
             //nothing left to read and we're in a flushable state
-            if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch, topicLag <= config.topicLagTrigger)) {
+            //TODO: could add a min flush interval or similar based upon total lag to skip
+            if (flush && flushCommitBackup(runTimeS, backupWatch, runWatch, commitWatch)) {
                 return;
             }
         }
         commit();
     }
 
-    private boolean flushCommitBackup(int runTimeS, StopWatch backupWatch, StopWatch runWatch, StopWatch commitWatch, boolean outputDenormalized) {
+    private boolean flushCommitBackup(int runTimeS, StopWatch backupWatch, StopWatch runWatch, StopWatch commitWatch) {
         //commitOrBackup at the end of the txn so that we don't need can
         //start fresh - has the loop exit like the old code
         metrics.timeSinceLastBackup.update(backupWatch.getTime());
@@ -541,12 +557,10 @@ public class Southpaw {
             }
         }
 
-        if (outputDenormalized) {
-            // Create the denormalized records that have been queued up
-            for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
-                createDenormalizedRecords(entry.getKey(), entry.getValue());
-                entry.getValue().clear();
-            }
+        // Create the denormalized records that have been queued up
+        for(Map.Entry<Relation, ByteArraySet> entry: dePKsByType.entrySet()) {
+            createDenormalizedRecords(entry.getKey(), entry.getValue());
+            entry.getValue().clear();
         }
         return false;
     }
@@ -686,7 +700,7 @@ public class Southpaw {
         if (rootRecordPKs.isEmpty()) {
             return;
         }
-        logger.info("creating " + rootRecordPKs.size() + " " + root.getEntity());
+        logger.info("creating {} {}", rootRecordPKs.size(), root.getEntity());
         for(ByteArray dePrimaryKey: rootRecordPKs) {
             if(dePrimaryKey != null) {
                 BaseTopic<byte[], DenormalizedRecord> outputTopic = outputTopics.get(root.getDenormalizedName());
